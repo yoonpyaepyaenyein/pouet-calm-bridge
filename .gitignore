@@ -1,0 +1,8 @@
+node_modules
+.vercel
+.yarn/
+
+# Real values never belong in the repository; .env.example holds only names.
+.env
+.env.*
+!.env.example

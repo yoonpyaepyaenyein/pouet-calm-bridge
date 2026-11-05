@@ -1,0 +1,19 @@
+{
+  "name": "pouet-calm-bridge",
+  "version": "1.0.0",
+  "description": "Calm the conversation bridge: a bot account replies to a Mastodon thread with an AI-written de-escalating message",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@vercel/kv": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "packageManager": "yarn@4.16.0+sha512.5374c94eb4ef6aa8188fb112f20c1aa6569f248d676c5e576e1fd2a1a4d8d87a96df65d9dfe1c2a0252cbe38bda46cf18d955005b81b43cc7607a5c9d56fd2b6"
+}

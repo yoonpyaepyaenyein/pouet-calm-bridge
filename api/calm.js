@@ -1,0 +1,199 @@
+import { CONFIG, getInstance } from '../lib/config.js';
+import {
+	CalmError,
+	canCalmAgain,
+	conversationLanguage,
+	formatConversation,
+	isShareable,
+	replyVisibility,
+} from '../lib/conversation.js';
+import { readBearerToken, readJsonBody, sendError, sendJson } from '../lib/http.js';
+import { loadConversation, postStatus, verifyAccount } from '../lib/mastodon.js';
+import { summarizeConversation } from '../lib/mistral.js';
+import {
+	claimThread,
+	finishThread,
+	readBotIdentity,
+	releaseThread,
+	rememberBotIdentity,
+} from '../lib/store.js';
+
+/**
+ * The bot's own account id on this instance, so its replies can be told from
+ * everyone else's. Cached for a day. A lookup that fails leaves the bot
+ * unidentified, and an unidentified bot lets the press through: refusing on a
+ * Redis or Mastodon hiccup would be the worse failure.
+ */
+const getBotAccountId = async instance => {
+	const cached = await readBotIdentity(instance.id).catch(() => null);
+	if (cached) return cached;
+	const account = await verifyAccount(instance.host, instance.botToken).catch(
+		() => null,
+	);
+	if (!account?.id) return null;
+	await rememberBotIdentity(instance.id, account.id).catch(() => {});
+	return account.id;
+};
+
+/**
+ * POST /api/calm  { instance, statusId, check? }  Authorization: Bearer <token>
+ *
+ * One press of the lotus. The bridge reads the thread, asks the model for a
+ * calming message and publishes it as the bot account, mentioning the person
+ * who asked so they are notified.
+ *
+ * The bot may be asked again later: a calmed thread that has carried on gets a
+ * fresh reply. What it will not do is answer itself, so a press is refused
+ * while the last post under the pressed one is the bot's own.
+ *
+ * With `check: true` nothing is published. The bridge only reports whether a
+ * press would work, which is how the app decides between the confirmation
+ * sheet and the "already calmed" one before spending anything on the model.
+ *
+ * The whole run happens inside this request: there is no queue and no worker.
+ * A short lived Redis lock stands in for one, so a second person pressing the
+ * lotus is told the bot is already answering rather than starting a second
+ * reply.
+ */
+export default async function handler(req, res) {
+	if (req.method !== 'POST') {
+		return sendJson(res, 405, { error: 'method_not_allowed' });
+	}
+
+	let claim = null;
+	let instance = null;
+	let rootId = null;
+	let statusIds = [];
+	try {
+		const body = readJsonBody(req);
+		if (!body) throw new CalmError('invalid_request', 400);
+		const token = readBearerToken(req);
+		if (!token) throw new CalmError('unauthorized', 401);
+
+		// The app sends an instance id, never a host: the bridge will only ever
+		// call a server named in its own environment.
+		instance = getInstance(body.instance);
+		if (!instance) throw new CalmError('unknown_instance', 400);
+		const statusId = String(body.statusId || '').trim();
+		if (!statusId || !/^[A-Za-z0-9_-]{1,64}$/.test(statusId)) {
+			throw new CalmError('invalid_request', 400);
+		}
+
+		// Mastodon decides who the caller is; the bridge never takes their word.
+		const requester = await verifyAccount(instance.host, token).catch(() => {
+			throw new CalmError('unauthorized', 401);
+		});
+
+		// Read the thread with the user's own token: they can only ask the bot to
+		// read a conversation they can already see themselves.
+		const conversation = await loadConversation(
+			instance.host,
+			token,
+			statusId,
+		).catch(error => {
+			throw error?.status === 404
+				? new CalmError('status_not_found', 404)
+				: new CalmError('mastodon_unavailable', 502);
+		});
+		const { root, replies, subject } = conversation;
+		rootId = String(root.id);
+		statusIds = conversation.statusIds;
+
+		// Checked before the lock, so a private thread never leaves a key behind.
+		// The pressed post counts too: the bot replies under it, in public view.
+		if (!isShareable(root) || !isShareable(subject)) {
+			throw new CalmError('restricted_conversation', 403);
+		}
+
+		// Nobody has spoken since the bot's own reply, so there is nothing new to
+		// calm. Checked before the lock and before the model, so a repeated press
+		// costs one Mastodon read and nothing else.
+		const botAccountId = await getBotAccountId(instance);
+		const open = canCalmAgain({
+			posts: [root, ...replies],
+			botAccountId,
+		});
+
+		// A check only reports; it never locks the thread or publishes anything.
+		if (body.check === true) {
+			return sendJson(res, 200, {
+				canCalm: open,
+				rootId,
+				statusIds: conversation.statusIds,
+			});
+		}
+		if (!open) throw new CalmError('already_calmed', 409);
+
+		claim = await claimThread({
+			instanceId: instance.id,
+			rootId,
+			requester: requester.acct,
+			statusIds,
+		});
+		if (!claim.claimed) {
+			// Not an error: the app shows the same lotus state either way.
+			return sendJson(res, 200, {
+				state: claim.entry.state === 'done' ? 'done' : 'loading',
+				rootId,
+				statusIds: conversation.statusIds,
+				alreadyRequested: true,
+			});
+		}
+
+		const language = conversationLanguage([root, ...replies]);
+		const { content } = formatConversation(root, replies);
+		const mention = `@${requester.acct}`;
+		const text = await summarizeConversation({
+			content,
+			botName: instance.botName || 'PouetFrance IA',
+			// The mention and the space before it are published too, so the model's
+			// own budget has to leave room for them inside Mastodon's 500.
+			maxCharacters: CONFIG.maxStatusCharacters - mention.length - 1,
+		});
+
+		// The bot answers under the pressed post, and never more publicly than the
+		// thread it is in.
+		const published = await postStatus(instance.host, instance.botToken, {
+			text: `${mention} ${text}`,
+			inReplyToId: conversation.subjectId,
+			visibility: replyVisibility(root, subject),
+			language,
+			// One key per round of the conversation: the thread plus its newest post
+			// at the time of the press. A post that succeeded but timed out on the
+			// way back is not published twice by a retry, two people pressing
+			// different posts of the same unchanged thread collapse onto one reply,
+			// and a thread that has since moved on gets a new key and a new reply.
+			idempotencyKey: `calm:${instance.id}:${rootId}:${
+				statusIds[statusIds.length - 1] || 'first'
+			}`,
+		}).catch(() => {
+			throw new CalmError('bot_post_failed', 502);
+		});
+
+		await finishThread({
+			instanceId: instance.id,
+			rootId,
+			botStatusId: String(published?.id || ''),
+			statusIds,
+		});
+
+		return sendJson(res, 200, {
+			state: 'done',
+			rootId,
+			statusIds: conversation.statusIds,
+			botStatusId: String(published?.id || ''),
+		});
+	} catch (error) {
+		// A failed run must not leave the lotus spinning for everyone else. A
+		// thread that was already red stays red: the earlier reply is still there.
+		if (claim?.claimed && instance && rootId) {
+			await releaseThread({
+				instanceId: instance.id,
+				rootId,
+				statusIds,
+				previousState: claim.previousState,
+			}).catch(() => {});
+		}
+		return sendError(res, error);
+	}
+}
