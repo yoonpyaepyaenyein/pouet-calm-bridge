@@ -366,6 +366,160 @@ test('a failed model call frees the lotus for another try', async () => {
 	assert.ok(calls.some(call => call.url.includes('api.mistral.ai')));
 });
 
+/** A model whose answers come from a list, one per call; the last repeats. */
+const scriptedModel = answers => {
+	const network = global.fetch;
+	const prompts = [];
+	let call = 0;
+	global.fetch = async (url, options = {}) => {
+		if (!url.includes('api.mistral.ai')) return network(url, options);
+		prompts.push(JSON.parse(options.body).messages[0].content);
+		const content = answers[Math.min(call, answers.length - 1)];
+		call += 1;
+		return {
+			ok: true,
+			status: 200,
+			json: async () => ({
+				choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }],
+			}),
+		};
+	};
+	return prompts;
+};
+
+const SEES_THE_IMAGE = 'Hello everyone, this image brings back memories. What stands out to you?';
+
+test('a draft the guard refuses is retried once with the reason, and then published', async () => {
+	stubFetch();
+	const prompts = scriptedModel([SEES_THE_IMAGE, ANSWER]);
+
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+
+	assert.equal(res.code, 200);
+	assert.equal(res.payload.state, 'done');
+	assert.equal(prompts.length, 2, 'exactly one retry');
+	// Only the second prompt names what went wrong.
+	assert.equal(prompts[0].includes('could see the media'), false);
+	assert.match(prompts[1], /could see the media/);
+});
+
+test('a second refusal is not retried again, and frees the lotus', async () => {
+	stubFetch();
+	const prompts = scriptedModel([SEES_THE_IMAGE]);
+
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+
+	assert.equal(res.code, 502);
+	assert.equal(res.payload.error, 'invalid_response');
+	assert.equal(prompts.length, 2, 'one retry, never a loop');
+	assert.deepEqual(threadKeys(), []);
+});
+
+const photoPost = () =>
+	post({
+		content: '<p></p>',
+		media_attachments: [
+			{
+				type: 'image',
+				description: 'A crowded school corridor',
+				preview_url: 'https://media.example/corridor-small.jpg',
+			},
+		],
+	});
+
+test('the photo itself goes to the model, and describing it is allowed', async () => {
+	const calls = stubFetch({ root: photoPost() });
+	scriptedModel(['Hello everyone, the photo shows a busy corridor full of students. Let’s keep it kind. What do you think?']);
+	const network = global.fetch;
+	const sent = [];
+	global.fetch = async (url, options = {}) => {
+		if (url.includes('api.mistral.ai')) sent.push(JSON.parse(options.body));
+		return network(url, options);
+	};
+
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+
+	assert.equal(res.code, 200, 'it can see the photo, so saying so is true');
+	const user = sent[0].messages[1].content;
+	assert.ok(Array.isArray(user));
+	assert.deepEqual(
+		user.find(part => part.type === 'image_url'),
+		{ type: 'image_url', image_url: 'https://media.example/corridor-small.jpg' },
+	);
+	assert.ok(calls.length > 0);
+});
+
+test('a thread with no words answers in the language of the person who asked', async () => {
+	const video = post({
+		content: '<p></p>',
+		// The poster's app tagged it French, but nobody wrote anything.
+		language: 'fr',
+		media_attachments: [
+			{ type: 'video', preview_url: 'https://media.example/park-frame.jpg' },
+		],
+	});
+	const calls = stubFetch({ root: video });
+
+	await run(calm, request({ instance: 'pouet', statusId: '100', language: 'en-GB' }));
+
+	const model = calls.find(call => call.url.includes('api.mistral.ai'));
+	const thread = JSON.parse(model.body.messages[1].content[0].text);
+	assert.equal(thread.readerLanguage, 'en');
+	// Stated as an order: as a field alone the model answered in French.
+	assert.match(model.body.messages[0].content, /Write your whole reply in English/);
+	const published = calls.find(
+		call => call.method === 'POST' && call.url.includes('/api/v1/statuses'),
+	);
+	assert.equal(published.body.language, 'en');
+});
+
+test('a thread with words keeps its own language, whoever asks', async () => {
+	const calls = stubFetch();
+
+	await run(calm, request({ instance: 'pouet', statusId: '100', language: 'en' }));
+
+	const model = calls.find(call => call.url.includes('api.mistral.ai'));
+	assert.equal(JSON.parse(model.body.messages[1].content).readerLanguage, undefined);
+	assert.doesNotMatch(model.body.messages[0].content, /Write your whole reply in/);
+	const published = calls.find(
+		call => call.method === 'POST' && call.url.includes('/api/v1/statuses'),
+	);
+	assert.equal(published.body.language, 'fr');
+});
+
+test('pictures the model refuses fall back to the text and alt text', async () => {
+	stubFetch({ root: photoPost() });
+	const network = global.fetch;
+	const sent = [];
+	global.fetch = async (url, options = {}) => {
+		if (!url.includes('api.mistral.ai')) return network(url, options);
+		const body = JSON.parse(options.body);
+		sent.push(body);
+		// A model or a picture Mistral will not take: a 400 for the request.
+		if (Array.isArray(body.messages[1].content)) {
+			return { ok: false, status: 400, json: async () => ({}) };
+		}
+		return network(url, options);
+	};
+
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+
+	assert.equal(res.code, 200);
+	assert.equal(sent.length, 2);
+	assert.equal(typeof sent[1].messages[1].content, 'string', 'second try is text only');
+});
+
+test('a refusal the model cannot fix is not retried', async () => {
+	stubFetch();
+	// A link is refused outright; asking the model again would only repeat it.
+	const prompts = scriptedModel(['See https://example.com for it. What next?']);
+
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+
+	assert.equal(res.code, 502);
+	assert.equal(prompts.length, 1);
+});
+
 test('a failed bot post frees the lotus too', async () => {
 	let posted = 0;
 	const base = stubFetch();

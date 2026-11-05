@@ -140,11 +140,24 @@ export default async function handler(req, res) {
 			});
 		}
 
-		const language = conversationLanguage([root, ...replies]);
-		const { content } = formatConversation(root, replies);
+		// Only a plain language code is taken from the app, e.g. "en" or "fr-FR".
+		const readerLanguage = /^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$/i.test(
+			String(body.language || ''),
+		)
+			? String(body.language).toLowerCase().split('-')[0]
+			: undefined;
+		const { content, images, textless } = formatConversation(root, replies, {
+			subject,
+			readerLanguage,
+		});
+		const language =
+			textless && readerLanguage
+				? readerLanguage
+				: conversationLanguage([root, ...replies]);
 		const mention = `@${requester.acct}`;
 		const text = await summarizeConversation({
 			content,
+			images,
 			botName: instance.botName || 'PouetFrance IA',
 			// The mention and the space before it are published too, so the model's
 			// own budget has to leave room for them inside Mastodon's 500.

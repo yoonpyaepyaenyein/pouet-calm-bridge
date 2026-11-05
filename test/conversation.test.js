@@ -144,6 +144,126 @@ test('the bot will not answer while it has the last word', () => {
 	assert.equal(canCalmAgain({ posts: [], botAccountId: '42' }), true);
 });
 
+test('a shared link reaches the model as words, never as an address', () => {
+	const shared = post({
+		content: '<p>Ce projet va tout changer.</p>',
+		card: {
+			url: 'https://ouest-france.fr/bretagne/transition-123',
+			title: 'Transition énergétique : la Bretagne accélère',
+			description: 'La région investit dans de nouveaux projets.',
+			image: 'https://ouest-france.fr/thumb.jpg',
+			provider_name: 'Ouest-France',
+		},
+	});
+
+	const { original } = JSON.parse(formatConversation(shared, []).content);
+
+	assert.equal(original.link.title, 'Transition énergétique : la Bretagne accélère');
+	assert.equal(original.link.description, 'La région investit dans de nouveaux projets.');
+	// Only the words travel: a URL in the payload could come back as a link in
+	// the bot's reply, and the publication's name is not ours to invoke.
+	assert.equal(original.link.url, undefined);
+	assert.equal(original.link.image, undefined);
+	assert.equal(original.link.provider_name, undefined);
+});
+
+test('a post that is only a shared link still has something to discuss', () => {
+	const bare = post({
+		content: '<p></p>',
+		card: { url: 'https://example.org/a', title: 'Les horaires changent' },
+	});
+
+	const { original } = JSON.parse(formatConversation(bare, []).content);
+
+	assert.equal(original.link.title, 'Les horaires changent');
+	// A card with nothing readable is left out rather than sent empty.
+	assert.throws(
+		() =>
+			formatConversation(
+				post({ content: '<p></p>', card: { url: 'https://example.org/a' } }),
+				[],
+			),
+		error => error.code === 'empty_conversation',
+	);
+});
+
+test('long link text is bounded like everything else from a post', () => {
+	const shared = post({
+		card: { title: 'a'.repeat(400), description: 'b'.repeat(900) },
+	});
+
+	const { original } = JSON.parse(formatConversation(shared, []).content);
+
+	assert.equal(original.link.title.length, 150);
+	assert.equal(original.link.description.length, 300);
+});
+
+test('pictures of the original and the pressed post are shown, nothing else', () => {
+	const photo = (id, extra = {}) => ({
+		type: 'image',
+		preview_url: `https://media.example/${id}-small.jpg`,
+		url: `https://media.example/${id}.jpg`,
+		...extra,
+	});
+	const root = post({
+		id: '1',
+		// Sent even with alt text: an only-a-photo post needs the picture itself.
+		media_attachments: [photo('a', { description: 'A crowded corridor' }), { type: 'gifv', url: 'https://media.example/g.mp4' }],
+	});
+	const pressed = post({ id: '2', media_attachments: [photo('b')] });
+	const other = post({ id: '3', media_attachments: [photo('c')] });
+
+	const { images, content } = formatConversation(root, [pressed, other], {
+		subject: pressed,
+	});
+
+	// The smaller preview, the original's first, and never another reply's.
+	assert.deepEqual(
+		images.map(image => [image.label, image.url, image.owner]),
+		[
+			['image1', 'https://media.example/a-small.jpg', 'the original post'],
+			['image2', 'https://media.example/b-small.jpg', 'the pressed reply'],
+		],
+	);
+	const thread = JSON.parse(content);
+	assert.deepEqual(thread.original.attachedImages, ['image1']);
+	assert.deepEqual(thread.replies[0].attachedImages, ['image2']);
+	assert.equal(thread.replies[1].attachedImages, undefined);
+});
+
+test('a video is shown as its still frame, never as the video file', () => {
+	const root = post({
+		content: '<p></p>',
+		media_attachments: [
+			{
+				type: 'video',
+				url: 'https://media.example/park.mp4',
+				preview_url: 'https://media.example/park-frame.jpg',
+			},
+			// No preview: nothing a picture model could look at.
+			{ type: 'gifv', url: 'https://media.example/loop.mp4' },
+		],
+	});
+
+	const { images } = formatConversation(root, []);
+
+	assert.deepEqual(
+		images.map(image => [image.url, image.kind]),
+		[['https://media.example/park-frame.jpg', 'video still']],
+	);
+});
+
+test('a picture address the provider cannot fetch safely is not sent', () => {
+	const root = post({
+		media_attachments: [
+			{ type: 'image', url: 'http://media.example/plain.jpg' },
+			{ type: 'image', url: 'javascript:alert(1)' },
+		],
+	});
+
+	assert.deepEqual(formatConversation(root, []).images, []);
+});
+
 test('a post with only an image is calmed, and the model is told about it', () => {
 	const image = post({
 		content: '<p></p>',
