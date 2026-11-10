@@ -1,6 +1,10 @@
 {
   "functions": {
-    "api/calm.js": { "maxDuration": 60 },
-    "api/states.js": { "maxDuration": 10 }
+    "api/calm.js": {
+      "maxDuration": 120
+    },
+    "api/states.js": {
+      "maxDuration": 10
+    }
   }
 }

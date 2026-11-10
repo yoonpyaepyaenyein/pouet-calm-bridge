@@ -6,12 +6,17 @@
  *
  *   MISTRAL_API_KEY=... node scripts/try-prompt.js
  *   MISTRAL_API_KEY=... node scripts/try-prompt.js --only fr-heated
+ *   MISTRAL_API_KEY=... SERPER_API_KEY=... node scripts/try-prompt.js --factcheck
+ *
+ * --factcheck also runs the fact-check step for each case and prints the claim
+ * it found and the trusted sources the search returned.
  *
  * The key is read from the environment and never printed.
  */
 import { formatConversation } from '../lib/conversation.js';
 import { summarizeConversation } from '../lib/mistral.js';
 import { CONFIG } from '../lib/config.js';
+import { gatherEvidence } from '../lib/factcheck.js';
 
 const post = (content, overrides = {}) => ({
 	id: String(Math.random()).slice(2),
@@ -57,6 +62,16 @@ const CASES = {
 		),
 		replies: [
 			fr('C’est faux, le chiffre réel est bien plus bas.', 'JulienSaintMalo'),
+		],
+	},
+	'fr-phone-law': {
+		about: 'A checkable claim a fact-checking site has covered',
+		root: fr(
+			'Le portable est interdit au collège depuis la loi de 2018, non ?',
+			'SophieRennes',
+		),
+		replies: [
+			fr('Pas du tout, aucune loi ne l’interdit, c’est chaque établissement.', 'JulienSaintMalo'),
 		],
 	},
 	'en-no-replies': {
@@ -113,6 +128,26 @@ const only = process.argv.includes('--only')
 	? process.argv[process.argv.indexOf('--only') + 1]
 	: null;
 
+const factCheck = process.argv.includes('--factcheck');
+
+const printEvidence = result => {
+	if (result.error || result.skipped) {
+		console.log(`   fact-check skipped: ${result.error || result.skipped}`);
+	}
+	if (!result.checkable) {
+		console.log(`   fact-check: no checkable claim (${result.ms} ms)`);
+		return;
+	}
+	console.log(`   fact-check claim: ${result.claim}`);
+	console.log(`   fact-check query: ${result.query} (${result.ms} ms)`);
+	if (!result.evidence.length) console.log('   no trusted source found');
+	for (const item of result.evidence) {
+		console.log(`   ${item.id} ${item.site}: ${item.title}`);
+		console.log(`      ${item.snippet}`);
+		console.log(`      ${item.url}`);
+	}
+};
+
 const run = async () => {
 	if (!process.env.MISTRAL_API_KEY?.trim()) {
 		console.error('MISTRAL_API_KEY is not set in this shell.');
@@ -139,7 +174,9 @@ const run = async () => {
 				botName: 'PouetFrance IA',
 				maxCharacters: CONFIG.maxStatusCharacters - mention.length - 1,
 			});
-			console.log(`${text}\n   [${Array.from(text).length} characters]\n`);
+			console.log(`${text}\n   [${Array.from(text).length} characters]`);
+			if (factCheck) printEvidence(await gatherEvidence({ content }));
+			console.log('');
 		} catch (error) {
 			console.log(`REFUSED: ${error.message}\n`);
 		}

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import calm from '../api/calm.js';
 import states from '../api/states.js';
+import { setKeepAlive } from '../lib/background.js';
+import { CONFIG } from '../lib/config.js';
 import { setKvClient } from '../lib/kv.js';
 
 // The whole request path runs here against an in-memory store and a stubbed
@@ -22,6 +24,16 @@ setKvClient({
 	},
 	async mget(...keys) {
 		return keys.map(key => (kvStore.has(key) ? kvStore.get(key) : null));
+	},
+	async lpush(key, value) {
+		kvStore.set(key, [value, ...(kvStore.get(key) || [])]);
+	},
+	async ltrim(key, start, stop) {
+		kvStore.set(key, (kvStore.get(key) || []).slice(start, stop + 1));
+	},
+	async expire() {},
+	async lrange(key, start, stop) {
+		return (kvStore.get(key) || []).slice(start, stop + 1);
 	},
 });
 
@@ -128,7 +140,10 @@ test.beforeEach(() => kvStore.clear());
  */
 const threadKeys = () =>
 	[...kvStore.keys()].filter(
-		key => !key.startsWith('calm:session:') && !key.startsWith('calm:bot:'),
+		key =>
+			!key.startsWith('calm:session:') &&
+			!key.startsWith('calm:bot:') &&
+			!key.startsWith('calm:factcheck:'),
 	);
 
 test('a lotus press publishes one bot reply that mentions the requester', async () => {
@@ -770,3 +785,175 @@ test('only POST is accepted', async () => {
 	const res = await run(calm, { method: 'GET', headers: {}, body: null });
 	assert.equal(res.code, 405);
 });
+
+/**
+ * A model that answers only after `delayMs`, so a run can outlast the time a
+ * press waits. `fail` makes the late answer an error instead.
+ */
+const slowModel = ({ delayMs, fail = false }) => {
+	const network = global.fetch;
+	global.fetch = async (url, options = {}) => {
+		if (!url.includes('api.mistral.ai')) return network(url, options);
+		await new Promise(resolve => setTimeout(resolve, delayMs));
+		if (fail) return { ok: false, status: 500, json: async () => ({}) };
+		return network(url, options);
+	};
+};
+
+/** Records background work instead of handing it to Vercel. */
+const recordBackground = () => {
+	const pending = [];
+	setKeepAlive(promise => pending.push(promise));
+	return pending;
+};
+
+test('a slow run answers loading, then publishes in the background', async t => {
+	const respondWithinMs = CONFIG.respondWithinMs;
+	CONFIG.respondWithinMs = 20;
+	t.after(() => {
+		CONFIG.respondWithinMs = respondWithinMs;
+	});
+	const pending = recordBackground();
+	const calls = stubFetch();
+	slowModel({ delayMs: 80 });
+
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	// The press is answered before the bot has written anything.
+	assert.equal(res.code, 200);
+	assert.equal(res.payload.state, 'loading');
+	assert.deepEqual(res.payload.statusIds, ['100']);
+	const midway = await run(states, request({ instance: 'pouet', statusIds: ['100'] }));
+	assert.deepEqual(midway.payload.states, { 100: 'loading' });
+
+	// The run goes on after the answer and finishes the job.
+	assert.equal(pending.length, 1);
+	await Promise.all(pending);
+	const published = calls.filter(
+		call => call.method === 'POST' && call.url.includes('/api/v1/statuses'),
+	);
+	assert.equal(published.length, 1, 'the bot reply is still published');
+	const after = await run(states, request({ instance: 'pouet', statusIds: ['100'] }));
+	assert.deepEqual(after.payload.states, { 100: 'done' });
+});
+
+test('a slow run that fails in the background frees the lotus', async t => {
+	const respondWithinMs = CONFIG.respondWithinMs;
+	CONFIG.respondWithinMs = 20;
+	t.after(() => {
+		CONFIG.respondWithinMs = respondWithinMs;
+	});
+	const pending = recordBackground();
+	stubFetch();
+	slowModel({ delayMs: 80, fail: true });
+
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	assert.equal(res.payload.state, 'loading');
+
+	// Nobody is waiting for the error any more, so the run cleans up after
+	// itself: the lotus goes back to how it was and can be pressed again.
+	await Promise.all(pending);
+	assert.deepEqual(threadKeys(), [], 'no key of the thread may outlive a failure');
+	stubFetch();
+	const retried = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	assert.equal(retried.payload.state, 'done');
+});
+
+test('a quick run still answers done and keeps showing its errors', async () => {
+	recordBackground();
+	stubFetch({
+		overrides: { 'api.mistral.ai': { ok: false, status: 500, json: async () => ({}) } },
+	});
+	const failed = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	// Within the wait, an error still reaches the person who pressed.
+	assert.equal(failed.code, 502);
+	assert.equal(failed.payload.error, 'server');
+	assert.deepEqual(threadKeys(), []);
+});
+
+test('with the fact-check off, nothing is searched', async () => {
+	delete process.env.FACTCHECK_MODE;
+	const pending = recordBackground();
+	const calls = stubFetch();
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	await Promise.all(pending);
+	assert.equal(res.payload.state, 'done');
+	assert.ok(!calls.some(call => call.url.includes('serper.dev')));
+	assert.equal(
+		calls.filter(call => call.url.includes('api.mistral.ai')).length,
+		1,
+		'only the reply is written',
+	);
+});
+
+test('in log mode the reply is unchanged and the search is recorded', async t => {
+	process.env.FACTCHECK_MODE = 'log';
+	process.env.SERPER_API_KEY = 'search-key';
+	t.after(() => {
+		delete process.env.FACTCHECK_MODE;
+		delete process.env.SERPER_API_KEY;
+	});
+	const pending = recordBackground();
+	const calls = stubFetch();
+	const network = global.fetch;
+	global.fetch = async (url, options = {}) => {
+		const body = options.body ? JSON.parse(options.body) : null;
+		// The claim step asks for JSON; the reply does not.
+		if (url.includes('api.mistral.ai') && body?.response_format) {
+			calls.push({ url, method: 'POST', body });
+			return {
+				ok: true,
+				status: 200,
+				json: async () => ({
+					choices: [{ message: { content: JSON.stringify({ checkable: true, claim: 'Rentrée difficile.', query: 'rentrée scolaire difficultés' }) } }],
+				}),
+			};
+		}
+		if (url.includes('serper.dev')) {
+			calls.push({ url, method: 'POST', body });
+			return {
+				ok: true,
+				status: 200,
+				json: async () => ({
+					organic: [{ link: 'https://www.ouest-france.fr/education/rentree', title: 'Rentrée', snippet: 'Les écoles font face à des difficultés.' }],
+				}),
+			};
+		}
+		return network(url, options);
+	};
+
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	await Promise.all(pending);
+
+	assert.equal(res.payload.state, 'done');
+	const published = calls.find(call => call.method === 'POST' && call.url.includes('/api/v1/statuses'));
+	assert.equal(published.body.status, `@julien ${ANSWER}`, 'the reply does not change in log mode');
+	assert.ok(!published.body.status.includes('http'));
+	const log = kvStore.get('calm:factcheck:log');
+	assert.equal(log.length, 1);
+	assert.equal(log[0].mode, 'log');
+	assert.equal(log[0].evidence[0].url, 'https://www.ouest-france.fr/education/rentree');
+});
+
+test('in log mode a failing search never stops the reply', async t => {
+	process.env.FACTCHECK_MODE = 'log';
+	process.env.SERPER_API_KEY = 'search-key';
+	t.after(() => {
+		delete process.env.FACTCHECK_MODE;
+		delete process.env.SERPER_API_KEY;
+	});
+	const pending = recordBackground();
+	const calls = stubFetch();
+	const network = global.fetch;
+	global.fetch = async (url, options = {}) => {
+		const body = options.body ? JSON.parse(options.body) : null;
+		if (url.includes('api.mistral.ai') && body?.response_format) {
+			throw new Error('claim step down');
+		}
+		return network(url, options);
+	};
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	await Promise.all(pending);
+	assert.equal(res.payload.state, 'done');
+	assert.ok(calls.some(call => call.method === 'POST' && call.url.includes('/api/v1/statuses')));
+});
+

@@ -10,6 +10,7 @@
     "test": "node --test test/"
   },
   "dependencies": {
+    "@vercel/functions": "^3.11.0",
     "@vercel/kv": "^2.0.0"
   },
   "engines": {

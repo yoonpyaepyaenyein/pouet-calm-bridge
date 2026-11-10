@@ -34,8 +34,13 @@ lived key: `SET NX` writes it only if it does not exist, so when two people
 press at the same moment exactly one request wins and the other is told the bot
 is already answering.
 
-There is no worker and nothing to schedule: the request that wins does the work
-before it responds. Threads are independent, so several can run at once.
+There is no worker and nothing to schedule: the request that wins does the work.
+Most runs finish within 50 seconds and answer `done`, so an error still reaches
+the person who pressed. A slower run answers `loading` at that point and keeps
+going in the background (Vercel's `waitUntil`, up to the function's 120 second
+`maxDuration`); the app follows the thread until it turns red, and a run that
+fails there frees the lotus itself. Threads are independent, so several can run
+at once.
 
 - The replies known when the bot runs get a copy of the state, so every reader
   sees the same lotus on them.
@@ -91,11 +96,41 @@ Errors are `{ error: "<code>" }` with codes the app translates:
   becomes pressable again.
 - Reply more publicly than the thread it is in.
 
-## Not here yet
+## Fact-check (optional)
 
-The fact-checking part of the ticket (web search and article citations) is not
-in this version. The app's `feature-ai-summary` package has that code and it
-can move here later; the flow above does not change when it does.
+The ticket asks the bot to say what is true on each side, "possibly using our
+related news articles and fact-checking resources". `lib/factcheck.js` is that
+step. It is off unless `FACTCHECK_MODE` says otherwise:
+
+| Mode | What happens |
+|---|---|
+| `off` (default) | Nothing runs. |
+| `log` | Beside each reply, the model is asked whether the thread holds a checkable claim (a figure, a date, an event). If it does, trusted sites are searched and the result is recorded in Redis for 14 days. The reply does not change. |
+| `on` | Not finished yet: for now it behaves like `log`. |
+
+How it stays safe:
+
+- Only sites on an allowlist are searched (`FACTCHECK_DOMAINS`, or the built-in
+  list: Ouest-France, AFP Factuel, Le Monde Les Décodeurs, franceinfo Vrai ou
+  Fake, Libération CheckNews, Droit à l'Info). Every result is checked against
+  the list again, so a lookalike host never passes.
+- Pages are never fetched. Only the search result's title and snippet are kept,
+  because several sources forbid reproducing their articles.
+- The search engine (Serper) receives a few plain words, never the thread, a
+  name, a handle or a link, and search operators are stripped from them.
+  Serper's privacy policy names no company address and allows storage outside
+  the EEA; whether that is acceptable is the client's call.
+- The whole step has 10 seconds and never throws: without a key, on a timeout
+  or on an odd answer the bot replies exactly as it would have.
+- Vera (askvera.org) is not used. Its terms forbid automated requests and
+  commercial use.
+
+Reviewing what log mode found:
+
+```bash
+node --env-file=.env.local scripts/factcheck-log.js      # last 20 results
+MISTRAL_API_KEY=... SERPER_API_KEY=... node scripts/try-prompt.js --factcheck
+```
 
 ## Running it
 
