@@ -1179,3 +1179,30 @@ test('in on mode a French thread tagged English still gets a French sentence', a
 	assert.ok(line.body.messages[0].content.includes('Start exactly with "Selon Ouest-France, "'));
 });
 
+const GUESSING =
+	'Hello everyone, it’s clear some find the new parking rules difficult to navigate. Others may share that frustration or see different challenges. Let’s keep the discussion calm and open. What’s your experience with the changes?';
+
+test('a reply that keeps guessing views is published without the guessed sentence', async () => {
+	// From the device: refused twice, and the person who pressed got an error.
+	const calls = stubFetch({ descendants: [post({ id: '101', content: '<p>Agreed, it is much harder to park now.</p>' })] });
+	const prompts = scriptedModel([GUESSING, GUESSING]);
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	assert.equal(res.code, 200);
+	assert.equal(res.payload.state, 'done');
+	assert.equal(prompts.length, 2, 'one retry, then the sentence is dropped');
+	const published = calls.find(call => call.method === 'POST' && call.url.includes('/api/v1/statuses'));
+	assert.equal(
+		published.body.status,
+		'@julien Hello everyone, it’s clear some find the new parking rules difficult to navigate. Let’s keep the discussion calm and open. What’s your experience with the changes?',
+	);
+});
+
+test('a guessed view is not dropped when too little would be left', async () => {
+	stubFetch();
+	const short = 'Hello everyone. Others may disagree. What do you think?';
+	scriptedModel([short, short]);
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	assert.equal(res.payload.error, 'invalid_response');
+	assert.deepEqual(threadKeys(), [], 'a failed press frees the lotus');
+});
+
