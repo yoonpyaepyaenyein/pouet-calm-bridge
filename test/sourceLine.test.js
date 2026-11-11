@@ -165,3 +165,22 @@ test('markdown around the publisher is dropped before the checks', async () => {
 	);
 });
 
+test('an English sentence is checked against the French claim without a word match', () => {
+	// The claim is written in French to search French sources; the sentence
+	// follows the thread, here English, so their words never overlap.
+	const check = (line, language) =>
+		lineProblem(line, {
+			claim: CLAIM,
+			source: SOURCE,
+			prefix: sourcePrefix('Ouest-France', language),
+			maxCharacters: 200,
+			language,
+		});
+	assert.equal(check('According to Ouest-France, phones have been banned in French middle schools since a 2018 law.', 'en'), null);
+	// The figure still has to be right, and a verdict is still refused.
+	assert.equal(check('According to Ouest-France, phones have been banned in French middle schools since 2015.', 'en'), 'new_number');
+	assert.equal(check('According to Ouest-France, it is wrong that phones are allowed in middle schools since 2018.', 'en'), 'verdict');
+	// A French sentence about something else is still refused.
+	assert.equal(check('Selon Ouest-France, les établissements ne sont pas prêts.', 'fr'), 'off_claim');
+});
+

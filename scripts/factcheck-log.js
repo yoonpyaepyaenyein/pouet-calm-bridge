@@ -33,6 +33,7 @@ const run = async () => {
 		}
 		console.log(`   claim: ${entry.claim}`);
 		console.log(`   query: ${entry.query}`);
+		if (entry.offTopic) console.log(`   ${entry.offTopic} result(s) dropped as not about the claim`);
 		if (!entry.evidence.length) console.log('   no trusted source found');
 		console.log(`   reply cited: ${entry.citedUrl || 'none'}`);
 		for (const item of entry.evidence) {

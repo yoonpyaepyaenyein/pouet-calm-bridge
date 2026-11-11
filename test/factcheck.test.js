@@ -360,5 +360,7 @@ test('the claim prompt keeps figures as the thread wrote them', async () => {
 	const prompt = calls.find(call => call.url.includes('api.mistral.ai')).body.messages[0].content;
 	assert.ok(prompt.includes('never one of your own'));
 	assert.ok(prompt.includes('keep each figure with its unit'));
+	// French sources are searched in French, whatever the thread's language.
+	assert.ok(prompt.includes('Write the claim and the query in French'));
 });
 

@@ -77,6 +77,11 @@ const CASES = {
 			fr('Pas du tout, aucune loi ne l’interdit, c’est chaque établissement.', 'JulienSaintMalo'),
 		],
 	},
+	'en-phone-law': {
+		about: 'The same checkable claim in English: searched in French, answered in English',
+		root: post('France banned phones in middle schools by law in 2018, right?'),
+		replies: [post('No, I think each school decides for itself.')],
+	},
 	'en-positive': {
 		about: 'Everyone agrees: the bot must not invent a disagreement',
 		root: post('The new evening opening hours at the library are great, I can finally study after work.'),
