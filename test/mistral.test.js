@@ -306,6 +306,9 @@ test('guessing what others may think is refused, on any thread', () => {
 		'Bonjour à tous, les avis divergent sur cette décision, et chacun peut avoir des raisons de la trouver surprenante ou nécessaire. Restons courtois. Qu’en pensez-vous ?',
 		'Bonjour à tous. D’autres pourraient y voir une avancée. Restons courtois. Qu’en pensez-vous ?',
 		'Hello everyone. Some might feel differently about it. Let’s keep it kind. What do you think?',
+		// From the device: verbs a fixed list missed.
+		'Hello everyone, it’s clear some find the new parking rules difficult to navigate. Others may share that frustration or see different challenges. Let’s keep the discussion calm and open. What’s your experience with the changes?',
+		'Hello everyone, it’s good to see this topic raised. Some may focus on the intent behind the rule, while others look at how it’s applied. Let’s keep it clear. How do you think this affects students?',
 		'Hello everyone, it’s clear some find the new parking rules difficult to navigate. Others may have different experiences or reasons for the changes. Let’s keep it respectful. What’s your take?',
 	]) {
 		assert.throws(

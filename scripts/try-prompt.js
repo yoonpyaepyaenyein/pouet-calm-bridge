@@ -19,7 +19,12 @@ import { formatConversation } from '../lib/conversation.js';
 import { summarizeConversation } from '../lib/mistral.js';
 import { CONFIG } from '../lib/config.js';
 import { gatherEvidence } from '../lib/factcheck.js';
-import { sourceRoom, withSource, writeSourceLine } from '../lib/sourceLine.js';
+import {
+	sourceRoom,
+	withSource,
+	writeSourceLine,
+	writtenLanguage,
+} from '../lib/sourceLine.js';
 
 const post = (content, overrides = {}) => ({
 	id: String(Math.random()).slice(2),
@@ -212,7 +217,7 @@ const run = async () => {
 					claim: found.claim,
 					figures: found.figures,
 					source,
-					language: scenario.root.language || 'en',
+					language: writtenLanguage(content) || scenario.root.language || 'en',
 					maxCharacters: room,
 					onProblem: (problem, draft) =>
 						console.log(`   source sentence refused (${problem}): ${draft || '(no text)'}`),

@@ -1169,3 +1169,13 @@ test('the wait follows Retry-After, capped, and a second 429 fails the press', a
 	assert.deepEqual(threadKeys(), [], 'a failed press frees the lotus');
 });
 
+test('in on mode a French thread tagged English still gets a French sentence', async t => {
+	onMode(t);
+	recordBackground();
+	const french = post({ language: 'en', content: '<p>Le portable est interdit au collège depuis la loi de 2018, non ?</p>' });
+	const calls = onModeNetwork({ claim: LAW_CLAIM, organic: LAW_RESULT, line: LAW_LINE, root: french });
+	await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	const line = calls.find(call => call.step === 'line');
+	assert.ok(line.body.messages[0].content.includes('Start exactly with "Selon Ouest-France, "'));
+});
+

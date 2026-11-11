@@ -3,6 +3,7 @@ import test from 'node:test';
 import { CONFIG } from '../lib/config.js';
 import { sourceName } from '../lib/factcheck.js';
 import {
+	writtenLanguage,
 	lineProblem,
 	sourcePrefix,
 	sourceRoom,
@@ -182,5 +183,55 @@ test('an English sentence is checked against the French claim without a word mat
 	assert.equal(check('According to Ouest-France, it is wrong that phones are allowed in middle schools since 2018.', 'en'), 'verdict');
 	// A French sentence about something else is still refused.
 	assert.equal(check('Selon Ouest-France, les établissements ne sont pas prêts.', 'fr'), 'off_claim');
+});
+
+test('a sentence that says what did not happen is refused', () => {
+	// The real dry run: the source says a 2018 law already bans phones in
+	// schools; the sentence said the opposite, with no verdict word in it.
+	const claim = 'La France a interdit les téléphones portables dans les collèges par une loi en 2018';
+	const source = {
+		title: 'Les téléphones bientôt interdits au lycée ? Le dispositif',
+		snippet: 'En effet, une loi de 2018 encadre déjà l’utilisation des smartphones, bannis dans les écoles et collèges.',
+	};
+	const check = (line, language) =>
+		lineProblem(line, { claim, source, prefix: sourcePrefix('Ouest-France', language), maxCharacters: 200, language });
+
+	assert.equal(check('According to Ouest-France, France did not ban mobile phones in schools by law in 2018.', 'en'), 'negation');
+	assert.equal(check('According to Ouest-France, phones are no longer allowed in middle schools since 2018.', 'en'), 'negation');
+	assert.equal(check('Selon Ouest-France, la loi de 2018 n’interdit pas le portable au collège.', 'fr'), 'negation');
+	assert.equal(check('Selon Ouest-France, aucune loi de 2018 n’interdit le téléphone portable au collège.', 'fr'), 'negation');
+	// Stated positively, the same fact passes.
+	assert.equal(check('According to Ouest-France, a 2018 law already bans smartphones in French primary and middle schools.', 'en'), null);
+	assert.equal(check('Selon Ouest-France, l’interdiction des téléphones portables s’applique déjà aux collèges en France depuis 2018.', 'fr'), null);
+});
+
+test('a sentence with a second idea is refused', () => {
+	const check = (line, language) =>
+		lineProblem(line, { claim: CLAIM, source: SOURCE, prefix: sourcePrefix('Ouest-France', language), maxCharacters: 200, language });
+	assert.equal(check('According to Ouest-France, phones are banned in middle schools since 2018; high schools come next.', 'en'), 'two_ideas');
+	assert.equal(check('According to Ouest-France, phones are banned in middle schools since 2018, but schools apply it.', 'en'), 'two_ideas');
+	assert.equal(check('Selon Ouest-France, le portable est interdit au collège depuis 2018, mais pas au lycée.', 'fr'), 'two_ideas');
+});
+
+test('a sentence that translates the snippet uses the larger model', async () => {
+	const models = [];
+	global.fetch = async (url, options) => {
+		models.push(JSON.parse(options.body).model);
+		return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'NONE' } }] }) };
+	};
+	await writeSourceLine({ claim: CLAIM, source: SOURCE, language: 'fr', maxCharacters: 200 });
+	await writeSourceLine({ claim: CLAIM, source: SOURCE, language: 'en', maxCharacters: 200 });
+	assert.deepEqual(models, [CONFIG.factCheck.lineModel, CONFIG.factCheck.translatedLineModel]);
+	assert.notEqual(CONFIG.factCheck.lineModel, CONFIG.factCheck.translatedLineModel);
+});
+
+test('the sentence language comes from what was written, not the post tag', () => {
+	const thread = (original, replies) =>
+		JSON.stringify({ original: { text: original, language: 'en' }, replies: replies.map(text => ({ text, language: 'en' })) });
+	// From the device: French text tagged "en" got an English sentence.
+	assert.equal(writtenLanguage(thread('La vitesse sur les routes secondaires est limitée à 80 km/h depuis 2018.', ['Faux, c’est toujours 90 km/h partout.'])), 'fr');
+	assert.equal(writtenLanguage(thread('France banned phones in middle schools by law in 2018, right?', ['No, I think each school decides for itself.'])), 'en');
+	// Too few words to tell: the caller falls back to the tag.
+	assert.equal(writtenLanguage(thread('2018 ?', [])), null);
 });
 

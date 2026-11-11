@@ -7,6 +7,7 @@ import {
 } from '../lib/factcheck.js';
 import {
 	SOURCE_LANGUAGES,
+	writtenLanguage,
 	sourceRoom,
 	withSource,
 	writeSourceLine,
@@ -97,19 +98,21 @@ const writeAndPublish = async ({
 	// be written or fails a check, the reply goes out alone, never with a bare
 	// link.
 	let post = `${mention} ${text}`;
+	// The sentence follows what participants wrote, not the posts' tags.
+	const lineLanguage = writtenLanguage(content) || language;
 	let citedUrl = null;
 	const source = found?.evidence?.[0];
 	const room = Math.min(CONFIG.factCheck.maxLineCharacters, sourceRoom(post));
 	if (
 		source &&
-		SOURCE_LANGUAGES.has(language) &&
+		SOURCE_LANGUAGES.has(lineLanguage) &&
 		room >= CONFIG.factCheck.minLineCharacters
 	) {
 		const line = await writeSourceLine({
 			claim: found.claim,
 			figures: found.figures,
 			source,
-			language,
+			language: lineLanguage,
 			maxCharacters: room,
 		});
 		if (line) {
