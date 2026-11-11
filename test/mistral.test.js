@@ -297,3 +297,33 @@ test('the prompt leaves the language to the thread and names the bot', () => {
 	assert.match(prompt, /untrusted conversation content/);
 	assert.match(prompt, /Do not declare a winner/);
 });
+
+test('guessing what others may think is refused, on any thread', () => {
+	// Drafts the model really wrote in dry runs: a side nobody argued, and
+	// reasons nobody gave.
+	for (const text of [
+		'Hello everyone, it’s understandable that some find the new parking rules difficult to navigate. Others may see different challenges or benefits in them. Let’s keep it respectful. What’s your take?',
+		'Bonjour à tous, les avis divergent sur cette décision, et chacun peut avoir des raisons de la trouver surprenante ou nécessaire. Restons courtois. Qu’en pensez-vous ?',
+		'Bonjour à tous. D’autres pourraient y voir une avancée. Restons courtois. Qu’en pensez-vous ?',
+		'Hello everyone. Some might feel differently about it. Let’s keep it kind. What do you think?',
+		'Hello everyone, it’s clear some find the new parking rules difficult to navigate. Others may have different experiences or reasons for the changes. Let’s keep it respectful. What’s your take?',
+	]) {
+		assert.throws(
+			// With replies: a one-sided thread has replies too.
+			() => parseSummary(completion(text), { maxCharacters: 480, hasReplies: true }),
+			error => error.message === 'invalid_response: guesses_views',
+			text,
+		);
+	}
+});
+
+test('reporting the sides people wrote, or inviting others, is still fine', () => {
+	for (const text of [
+		'Hello everyone, some see phones as a distraction, others as a safety tool. Both concerns are understandable. Let’s keep it respectful. What might help?',
+		'Hello everyone, we would love to hear what others think. Let’s keep it kind. What matters most to you?',
+		'Bonjour à tous, on peut avoir des avis différents. Restons courtois. Qu’en pensez-vous ?',
+	]) {
+		assert.equal(accept(text), text);
+	}
+});
+

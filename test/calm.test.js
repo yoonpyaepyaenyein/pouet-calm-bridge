@@ -927,6 +927,11 @@ test('in log mode the reply is unchanged and the search is recorded', async t =>
 	assert.equal(res.payload.state, 'done');
 	const published = calls.find(call => call.method === 'POST' && call.url.includes('/api/v1/statuses'));
 	assert.equal(published.body.status, `@julien ${ANSWER}`, 'the reply does not change in log mode');
+	// The claim step starts only once the reply is out, so it never competes
+	// with the reply for the model's rate limit.
+	const publishedAt = calls.indexOf(published);
+	const claimAt = calls.findIndex(call => call.body?.response_format);
+	assert.ok(claimAt > publishedAt, 'the fact-check must run after the reply is published');
 	assert.ok(!published.body.status.includes('http'));
 	const log = kvStore.get('calm:factcheck:log');
 	assert.equal(log.length, 1);
@@ -955,5 +960,212 @@ test('in log mode a failing search never stops the reply', async t => {
 	await Promise.all(pending);
 	assert.equal(res.payload.state, 'done');
 	assert.ok(calls.some(call => call.method === 'POST' && call.url.includes('/api/v1/statuses')));
+});
+
+/**
+ * A network for "on" mode: the claim step, the search, the reply and the
+ * source sentence each answer as given, and the order of the calls is kept.
+ */
+const onModeNetwork = ({ claim, organic, reply = ANSWER, line, root }) => {
+	const calls = stubFetch(root ? { root } : {});
+	const network = global.fetch;
+	global.fetch = async (url, options = {}) => {
+		const body = options.body ? JSON.parse(options.body) : null;
+		const answer = content => ({
+			ok: true,
+			status: 200,
+			json: async () => ({
+				choices: [{ finish_reason: 'stop', message: { role: 'assistant', content } }],
+			}),
+		});
+		if (url.includes('serper.dev')) {
+			calls.push({ url, method: 'POST', body, step: 'search' });
+			if (organic instanceof Error) throw organic;
+			return { ok: true, status: 200, json: async () => ({ organic }) };
+		}
+		if (url.includes('api.mistral.ai')) {
+			const system = body.messages[0].content;
+			if (body.response_format) {
+				calls.push({ url, method: 'POST', body, step: 'claim' });
+				return answer(JSON.stringify(claim));
+			}
+			if (system.startsWith('You write one neutral sentence')) {
+				calls.push({ url, method: 'POST', body, step: 'line' });
+				if (line instanceof Error) return { ok: false, status: 429, json: async () => ({}) };
+				return answer(line);
+			}
+			calls.push({ url, method: 'POST', body, step: 'reply' });
+			return answer(reply);
+		}
+		return network(url, options);
+	};
+	return calls;
+};
+
+const LAW_CLAIM = {
+	checkable: true,
+	claim: 'La loi de 2018 interdit les téléphones portables dans les collèges.',
+	query: 'loi téléphone portable collège 2018',
+};
+const LAW_RESULT = [
+	{
+		link: 'https://www.ouest-france.fr/education/portables-interdits',
+		title: 'Portables interdits dans les lycées : « Les établissements ne sont pas prêts »',
+		snippet: 'Déjà en vigueur de la maternelle au collège depuis 2018, l’interdiction du téléphone portable sera étendue aux lycées dès la rentrée par la loi.',
+	},
+];
+const LAW_LINE =
+	'Selon Ouest-France, le téléphone portable est interdit de la maternelle au collège depuis 2018.';
+
+const onMode = t => {
+	process.env.FACTCHECK_MODE = 'on';
+	process.env.SERPER_API_KEY = 'search-key';
+	t.after(() => {
+		delete process.env.FACTCHECK_MODE;
+		delete process.env.SERPER_API_KEY;
+	});
+};
+
+const publishedPost = calls =>
+	calls.find(call => call.method === 'POST' && call.url.includes('/api/v1/statuses'));
+
+test('in on mode the reply is unchanged and a checked sentence and link follow it', async t => {
+	onMode(t);
+	const pending = recordBackground();
+	const calls = onModeNetwork({ claim: LAW_CLAIM, organic: LAW_RESULT, line: LAW_LINE });
+
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	await Promise.all(pending);
+
+	assert.equal(res.payload.state, 'done');
+	// One call at a time, in this order.
+	assert.deepEqual(
+		calls.filter(call => call.step).map(call => call.step),
+		['claim', 'search', 'reply', 'line'],
+	);
+	// Each call goes to its own model, because Mistral's limit is per model:
+	// the reply keeps the reply model, the two small steps use others.
+	const modelOf = step => calls.find(call => call.step === step).body.model;
+	assert.equal(modelOf('reply'), CONFIG.mistral.model);
+	assert.equal(modelOf('claim'), CONFIG.factCheck.claimModel);
+	assert.equal(modelOf('line'), CONFIG.factCheck.lineModel);
+	assert.notEqual(modelOf('claim'), modelOf('reply'));
+	assert.notEqual(modelOf('line'), modelOf('reply'));
+
+	// The reply is written exactly as without a source.
+	const reply = calls.find(call => call.step === 'reply');
+	assert.ok(reply.body.messages[0].content.includes('You have no sources'));
+	assert.ok(!JSON.stringify(reply.body).includes('ouest-france.fr'));
+
+	assert.equal(
+		publishedPost(calls).body.status,
+		`@julien ${ANSWER}\n\n${LAW_LINE}\nhttps://www.ouest-france.fr/education/portables-interdits`,
+	);
+	assert.equal(
+		kvStore.get('calm:factcheck:log')[0].citedUrl,
+		'https://www.ouest-france.fr/education/portables-interdits',
+	);
+});
+
+test('in on mode a sentence that fails a check means no link at all', async t => {
+	onMode(t);
+	for (const line of [
+		'NONE',
+		// A figure the source does not give.
+		'Selon Ouest-France, le portable est interdit au collège depuis 2015.',
+		// A verdict.
+		'Selon Ouest-France, il est faux de dire que le portable est autorisé au collège depuis 2018.',
+		// Another publisher.
+		'Selon l’AFP, le portable est interdit au collège depuis 2018.',
+		// The call fails.
+		new Error('rate limited'),
+	]) {
+		kvStore.clear();
+		recordBackground();
+		const calls = onModeNetwork({ claim: LAW_CLAIM, organic: LAW_RESULT, line });
+		const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+		assert.equal(res.payload.state, 'done', String(line));
+		assert.equal(publishedPost(calls).body.status, `@julien ${ANSWER}`, String(line));
+	}
+});
+
+test('in on mode nothing relevant found means no sentence call at all', async t => {
+	onMode(t);
+	recordBackground();
+	const calls = onModeNetwork({
+		claim: LAW_CLAIM,
+		organic: [{ link: 'https://www.ouest-france.fr/sport/x', title: 'Football', snippet: 'Le match de samedi.' }],
+		line: LAW_LINE,
+	});
+	await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	assert.ok(!calls.some(call => call.step === 'line'), 'two calls only when there is no source');
+	assert.equal(publishedPost(calls).body.status, `@julien ${ANSWER}`);
+});
+
+test('in on mode a failed search still gives the usual reply', async t => {
+	onMode(t);
+	recordBackground();
+	const calls = onModeNetwork({ claim: LAW_CLAIM, organic: new Error('search down'), line: LAW_LINE });
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	assert.equal(res.payload.state, 'done');
+	assert.equal(publishedPost(calls).body.status, `@julien ${ANSWER}`);
+});
+
+test('in on mode a thread in another language gets no source sentence', async t => {
+	onMode(t);
+	recordBackground();
+	const spanish = post({ language: 'es', content: '<p>La ley de 2018 prohíbe el móvil en el colegio.</p>' });
+	const calls = onModeNetwork({ claim: LAW_CLAIM, organic: LAW_RESULT, line: LAW_LINE, root: spanish });
+	await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	assert.equal(publishedPost(calls).body.language, 'es');
+	assert.ok(!calls.some(call => call.step === 'line'), 'no English sentence under a Spanish thread');
+	assert.equal(publishedPost(calls).body.status, `@julien ${ANSWER}`);
+});
+
+test('a rate-limited reply is waited out once, then published', async t => {
+	const waitMs = CONFIG.mistral.rateLimitWaitMs;
+	CONFIG.mistral.rateLimitWaitMs = 5;
+	t.after(() => {
+		CONFIG.mistral.rateLimitWaitMs = waitMs;
+	});
+	const calls = stubFetch();
+	const network = global.fetch;
+	let modelCalls = 0;
+	global.fetch = async (url, options = {}) => {
+		if (url.includes('api.mistral.ai')) {
+			modelCalls += 1;
+			if (modelCalls === 1) return { ok: false, status: 429, json: async () => ({}) };
+		}
+		return network(url, options);
+	};
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	assert.equal(res.payload.state, 'done');
+	assert.equal(modelCalls, 2);
+	assert.equal(publishedPost(calls).body.status, `@julien ${ANSWER}`);
+});
+
+test('the wait follows Retry-After, capped, and a second 429 fails the press', async t => {
+	const maxWait = CONFIG.mistral.maxRateLimitWaitMs;
+	CONFIG.mistral.maxRateLimitWaitMs = 20;
+	t.after(() => {
+		CONFIG.mistral.maxRateLimitWaitMs = maxWait;
+	});
+	stubFetch();
+	const network = global.fetch;
+	let modelCalls = 0;
+	const started = Date.now();
+	global.fetch = async (url, options = {}) => {
+		if (url.includes('api.mistral.ai')) {
+			modelCalls += 1;
+			// Asks for an hour; the cap keeps the press to 20 ms here.
+			return { ok: false, status: 429, headers: new Headers({ 'retry-after': '3600' }), json: async () => ({}) };
+		}
+		return network(url, options);
+	};
+	const res = await run(calm, request({ instance: 'pouet', statusId: '100' }));
+	assert.equal(modelCalls, 2, 'one retry only');
+	assert.equal(res.payload.error, 'rate_limit');
+	assert.ok(Date.now() - started < 1000, 'the wait is capped');
+	assert.deepEqual(threadKeys(), [], 'a failed press frees the lotus');
 });
 

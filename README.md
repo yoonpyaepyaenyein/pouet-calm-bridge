@@ -106,20 +106,27 @@ step. It is off unless `FACTCHECK_MODE` says otherwise:
 |---|---|
 | `off` (default) | Nothing runs. |
 | `log` | Beside each reply, the model is asked whether the thread holds a checkable claim (a figure, a date, an event). If it does, trusted sites are searched and the result is recorded in Redis for 14 days. The reply does not change. |
-| `on` | Not finished yet: for now it behaves like `log`. |
+| `on` | The search runs first. The reply is written exactly as without it. If a kept result settles the claim, a separate short call writes one sentence starting "Selon <publisher>," (or "According to <publisher>,"), and the bridge checks it: no figure the source does not give, no verdict, no copied passage, about the claim. Only then are the sentence and the source's link added under the reply. Otherwise the reply goes out alone, never with a bare link. |
 
 How it stays safe:
 
 - Only sites on an allowlist are searched (`FACTCHECK_DOMAINS`, or the built-in
   list: Ouest-France, AFP Factuel, Le Monde Les Décodeurs, franceinfo Vrai ou
-  Fake, Libération CheckNews, Droit à l'Info). Every result is checked against
+  faux, Libération CheckNews, Droit à l'Info, Les Surligneurs). Every result is checked against
   the list again, so a lookalike host never passes.
+- A result is kept only if it carries every number the claim names and shares
+  at least two of its subject words, so a piece on a 5 % deficit never reaches
+  the model for a claim about a 40 % rise.
 - Pages are never fetched. Only the search result's title and snippet are kept,
   because several sources forbid reproducing their articles.
 - The search engine (Serper) receives a few plain words, never the thread, a
   name, a handle or a link, and search operators are stripped from them.
   Serper's privacy policy names no company address and allows storage outside
   the EEA; whether that is acceptable is the client's call.
+- Mistral's free tier allows 2 requests a minute **per model**, so the claim
+  check runs on `FACTCHECK_CLAIM_MODEL` (default ministral-8b) and the source
+  sentence on `FACTCHECK_LINE_MODEL` (default ministral-3b). The reply model is
+  still called once per press, as with fact-check off.
 - The whole step has 10 seconds and never throws: without a key, on a timeout
   or on an odd answer the bot replies exactly as it would have.
 - Vera (askvera.org) is not used. Its terms forbid automated requests and

@@ -6,6 +6,12 @@ import {
 	recordFactCheck,
 } from '../lib/factcheck.js';
 import {
+	SOURCE_LANGUAGES,
+	sourceRoom,
+	withSource,
+	writeSourceLine,
+} from '../lib/sourceLine.js';
+import {
 	CalmError,
 	canCalmAgain,
 	conversationLanguage,
@@ -70,19 +76,11 @@ const writeAndPublish = async ({
 			? readerLanguage
 			: conversationLanguage([root, ...replies]);
 
-	// The fact-check runs beside the reply and is only recorded for review, so it
-	// adds no wait and nothing it does can change or stop the reply. (In "on"
-	// mode the reply will use it; until then "on" behaves like "log".)
+	// In "on" mode the search runs before anything is written, one call at a
+	// time, so the model is never asked for two things at once (its rate limit
+	// is per minute). It has its own time limit and never throws.
 	const mode = factCheckMode();
-	if (mode !== 'off') {
-		keepAlive(
-			gatherEvidence({ content })
-				.then(result =>
-					recordFactCheck({ instanceId: instance.id, rootId, mode, result }),
-				)
-				.catch(() => {}),
-		);
-	}
+	const found = mode === 'on' ? await gatherEvidence({ content }) : null;
 
 	const mention = `@${requester.acct}`;
 	const text = await summarizeConversation({
@@ -94,10 +92,36 @@ const writeAndPublish = async ({
 		maxCharacters: CONFIG.maxStatusCharacters - mention.length - 1,
 	});
 
+	// The reply is the same as without a source. A source that settles the claim
+	// adds one checked sentence and its link underneath; if the sentence cannot
+	// be written or fails a check, the reply goes out alone, never with a bare
+	// link.
+	let post = `${mention} ${text}`;
+	let citedUrl = null;
+	const source = found?.evidence?.[0];
+	const room = Math.min(CONFIG.factCheck.maxLineCharacters, sourceRoom(post));
+	if (
+		source &&
+		SOURCE_LANGUAGES.has(language) &&
+		room >= CONFIG.factCheck.minLineCharacters
+	) {
+		const line = await writeSourceLine({
+			claim: found.claim,
+			figures: found.figures,
+			source,
+			language,
+			maxCharacters: room,
+		});
+		if (line) {
+			post = withSource(post, line, source);
+			citedUrl = source.url;
+		}
+	}
+
 	// The bot answers under the pressed post, and never more publicly than the
 	// thread it is in.
 	const published = await postStatus(instance.host, instance.botToken, {
-		text: `${mention} ${text}`,
+		text: post,
 		inReplyToId: conversation.subjectId,
 		visibility: replyVisibility(root, subject),
 		language,
@@ -115,6 +139,23 @@ const writeAndPublish = async ({
 
 	const botStatusId = String(published?.id || '');
 	await finishThread({ instanceId: instance.id, rootId, botStatusId, statusIds });
+
+	// Every fact-check is recorded for review, with the source the reply cited.
+	// In "log" mode it only runs now, after the reply is out, so it can neither
+	// delay the reply nor compete with it for the model's rate limit.
+	const record = result =>
+		recordFactCheck({
+			instanceId: instance.id,
+			rootId,
+			mode,
+			result,
+			citedUrl,
+		});
+	if (found) {
+		keepAlive(record(found).catch(() => {}));
+	} else if (mode === 'log') {
+		keepAlive(gatherEvidence({ content }).then(record).catch(() => {}));
+	}
 	return { botStatusId };
 };
 

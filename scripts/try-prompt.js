@@ -8,8 +8,10 @@
  *   MISTRAL_API_KEY=... node scripts/try-prompt.js --only fr-heated
  *   MISTRAL_API_KEY=... SERPER_API_KEY=... node scripts/try-prompt.js --factcheck
  *
- * --factcheck also runs the fact-check step for each case and prints the claim
- * it found and the trusted sources the search returned.
+ * --factcheck previews "on" mode: for each case it prints the claim found and
+ * the trusted sources kept, then the post as it would be published: the reply,
+ * and under it the checked sentence and link when a source settles the claim.
+ * Nothing is published either way.
  *
  * The key is read from the environment and never printed.
  */
@@ -17,6 +19,7 @@ import { formatConversation } from '../lib/conversation.js';
 import { summarizeConversation } from '../lib/mistral.js';
 import { CONFIG } from '../lib/config.js';
 import { gatherEvidence } from '../lib/factcheck.js';
+import { sourceRoom, withSource, writeSourceLine } from '../lib/sourceLine.js';
 
 const post = (content, overrides = {}) => ({
 	id: String(Math.random()).slice(2),
@@ -74,6 +77,14 @@ const CASES = {
 			fr('Pas du tout, aucune loi ne l’interdit, c’est chaque établissement.', 'JulienSaintMalo'),
 		],
 	},
+	'en-positive': {
+		about: 'Everyone agrees: the bot must not invent a disagreement',
+		root: post('The new evening opening hours at the library are great, I can finally study after work.'),
+		replies: [
+			post('Totally agree, the evening hours are really helpful for us.'),
+			post('Same here, I went yesterday and it was calm and pleasant.'),
+		],
+	},
 	'en-no-replies': {
 		about: 'No replies at all: the bot must not invent a debate',
 		root: post('The new library opening hours start next week.'),
@@ -129,10 +140,12 @@ const only = process.argv.includes('--only')
 	: null;
 
 const factCheck = process.argv.includes('--factcheck');
+const PAUSE_MS = 2000;
 
 const printEvidence = result => {
 	if (result.error || result.skipped) {
-		console.log(`   fact-check skipped: ${result.error || result.skipped}`);
+		console.log(`   fact-check skipped: ${result.error || result.skipped} (${result.ms} ms)`);
+		return;
 	}
 	if (!result.checkable) {
 		console.log(`   fact-check: no checkable claim (${result.ms} ms)`);
@@ -140,6 +153,7 @@ const printEvidence = result => {
 	}
 	console.log(`   fact-check claim: ${result.claim}`);
 	console.log(`   fact-check query: ${result.query} (${result.ms} ms)`);
+	if (result.offTopic) console.log(`   ${result.offTopic} result(s) dropped as not about the claim`);
 	if (!result.evidence.length) console.log('   no trusted source found');
 	for (const item of result.evidence) {
 		console.log(`   ${item.id} ${item.site}: ${item.title}`);
@@ -155,31 +169,58 @@ const run = async () => {
 	}
 	console.log(`model: ${CONFIG.mistral.model}\n`);
 
+	// A pause between cases keeps a run of several under the model's rate limit;
+	// back to back, every case came back 429.
+	let first = true;
 	for (const [name, scenario] of Object.entries(CASES)) {
 		if (only && only !== name) continue;
+		if (!first) await new Promise(resolve => setTimeout(resolve, PAUSE_MS));
+		first = false;
 		console.log(`── ${name} ─ ${scenario.about}`);
 		const mention = '@someone';
+		// Mastodon attaches the preview to the post that carries the link.
+		const root = scenario.card
+			? { ...scenario.root, card: scenario.card }
+			: scenario.root;
+		const { content, images } = formatConversation(root, scenario.replies, {
+			subject: root,
+			readerLanguage: 'en',
+		});
+		// With --factcheck this is exactly "on" mode: the search first, then the
+		// reply written with whatever it found.
+		const found = factCheck ? await gatherEvidence({ content }) : null;
+		if (found) printEvidence(found);
 		try {
-			// Mastodon attaches the preview to the post that carries the link.
-			const root = scenario.card
-				? { ...scenario.root, card: scenario.card }
-				: scenario.root;
-			const { content, images } = formatConversation(root, scenario.replies, {
-				subject: root,
-				readerLanguage: 'en',
-			});
 			const text = await summarizeConversation({
 				content,
 				images,
 				botName: 'PouetFrance IA',
 				maxCharacters: CONFIG.maxStatusCharacters - mention.length - 1,
+				onRefused: (reason, draft) =>
+					console.log(`   refused draft (${reason}):\n   ${draft || '(no text)'}`),
 			});
-			console.log(`${text}\n   [${Array.from(text).length} characters]`);
-			if (factCheck) printEvidence(await gatherEvidence({ content }));
-			console.log('');
+			let post = `${mention} ${text}`;
+			const source = found?.evidence?.[0];
+			const room = Math.min(CONFIG.factCheck.maxLineCharacters, sourceRoom(post));
+			if (source && room >= CONFIG.factCheck.minLineCharacters) {
+				const line = await writeSourceLine({
+					claim: found.claim,
+					figures: found.figures,
+					source,
+					language: scenario.root.language || 'en',
+					maxCharacters: room,
+					onProblem: (problem, draft) =>
+						console.log(`   source sentence refused (${problem}): ${draft || '(no text)'}`),
+				});
+				post = withSource(post, line, source);
+			} else if (source) {
+				console.log(`   no room for a source sentence (${room} characters left)`);
+			}
+			console.log(`${post}\n   [${Array.from(post).length} characters as typed]`);
 		} catch (error) {
-			console.log(`REFUSED: ${error.message}\n`);
+			console.log(`REFUSED: ${error.message}`);
 		}
+		console.log('');
 	}
 };
 

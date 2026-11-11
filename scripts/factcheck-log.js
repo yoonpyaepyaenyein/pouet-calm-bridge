@@ -34,6 +34,7 @@ const run = async () => {
 		console.log(`   claim: ${entry.claim}`);
 		console.log(`   query: ${entry.query}`);
 		if (!entry.evidence.length) console.log('   no trusted source found');
+		console.log(`   reply cited: ${entry.citedUrl || 'none'}`);
 		for (const item of entry.evidence) {
 			console.log(`   - ${item.site}${item.date ? ` (${item.date})` : ''}: ${item.title}`);
 			console.log(`     ${item.snippet}`);
