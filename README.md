@@ -117,6 +117,10 @@ How it stays safe:
 - A result is kept only if it carries every number the claim names and shares
   at least two of its subject words, so a piece on a 5 % deficit never reaches
   the model for a claim about a 40 % rise.
+- Each app searches **its own newspaper** plus the shared fact-checkers (Pouet:
+  ouest-france.fr, Humanité: humanite.fr), so a Humanité thread never cites a
+  competitor. `CALM_<ID>_FACTCHECK_DOMAINS` overrides the list for one app and
+  `CALM_<ID>_BOT_NAME` sets the name its bot uses in the prompt.
 - Pages are never fetched. Only the search result's title and snippet are kept,
   because several sources forbid reproducing their articles.
 - The search engine (Serper) receives a few plain words, never the thread, a

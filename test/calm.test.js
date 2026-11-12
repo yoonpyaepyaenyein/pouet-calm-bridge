@@ -1206,3 +1206,53 @@ test('a guessed view is not dropped when too little would be left', async () => 
 	assert.deepEqual(threadKeys(), [], 'a failed press frees the lotus');
 });
 
+test('each app names its own bot, and Pouet keeps the name its replies were approved with', async () => {
+	const keys = ['CALM_INSTANCES', 'CALM_HUMANITE_HOST', 'CALM_HUMANITE_BOT_TOKEN', 'CALM_HUMANITE_BOT_NAME'];
+	const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+	process.env.CALM_INSTANCES = 'pouet,humanite';
+	process.env.CALM_HUMANITE_HOST = 'social.humanite.fr';
+	process.env.CALM_HUMANITE_BOT_TOKEN = 'h-token';
+	try {
+		const { getInstance, getInstanceIds } = await import('../lib/config.js');
+		assert.deepEqual(getInstanceIds(), ['pouet', 'humanite']);
+		assert.equal(getInstance('pouet').botName, 'PouetFrance IA');
+		assert.equal(getInstance('humanite').botName, 'Calm Bot');
+		process.env.CALM_HUMANITE_BOT_NAME = 'Humanité IA';
+		assert.equal(getInstance('humanite').botName, 'Humanité IA');
+		assert.equal(getInstance('humanite').host, 'social.humanite.fr');
+	} finally {
+		for (const key of keys) {
+			if (saved[key] === undefined) delete process.env[key];
+			else process.env[key] = saved[key];
+		}
+	}
+});
+
+test('a Humanité press is answered by the Humanité bot on the Humanité server', async () => {
+	const keys = ['CALM_INSTANCES', 'CALM_HUMANITE_HOST', 'CALM_HUMANITE_BOT_TOKEN'];
+	const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+	process.env.CALM_INSTANCES = 'pouet,humanite';
+	process.env.CALM_HUMANITE_HOST = 'social.humanite.fr';
+	process.env.CALM_HUMANITE_BOT_TOKEN = 'h-token';
+	try {
+		recordBackground();
+		const calls = stubFetch();
+		const res = await run(calm, request({ instance: 'humanite', statusId: '100' }));
+		assert.equal(res.payload.state, 'done');
+		const published = publishedPost(calls);
+		assert.ok(published.url.startsWith('https://social.humanite.fr/'), published.url);
+		assert.equal(published.headers.Authorization, 'Bearer h-token');
+		assert.ok(published.headers['Idempotency-Key'].startsWith('calm:humanite:'));
+		// Not the Pouet server, and not the Pouet bot.
+		assert.ok(calls.every(call => !call.url.includes('pouetfrance.social')));
+		const model = calls.find(call => call.url.includes('api.mistral.ai'));
+		assert.ok(model.body.messages[0].content.includes('You are Calm Bot'));
+		assert.ok(!model.body.messages[0].content.includes('PouetFrance'));
+	} finally {
+		for (const key of keys) {
+			if (saved[key] === undefined) delete process.env[key];
+			else process.env[key] = saved[key];
+		}
+	}
+});
+

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+	defaultDomains,
 	claimFigures,
 	cleanQuery,
 	figuresCovered,
@@ -362,5 +363,47 @@ test('the claim prompt keeps figures as the thread wrote them', async () => {
 	assert.ok(prompt.includes('keep each figure with its unit'));
 	// French sources are searched in French, whatever the thread's language.
 	assert.ok(prompt.includes('Write the claim and the query in French'));
+});
+
+test('each app searches its own newspaper, never the other one', () => {
+	const hosts = id => trustedSources('', id).map(source => source.host);
+	assert.ok(hosts('pouet').includes('ouest-france.fr'));
+	assert.ok(!hosts('pouet').includes('humanite.fr'));
+	assert.ok(hosts('humanite').includes('humanite.fr'));
+	assert.ok(!hosts('humanite').includes('ouest-france.fr'), 'a competitor is not "our" news');
+	// The fact-checkers are shared, and an unknown app gets only those.
+	for (const id of ['pouet', 'humanite', 'other']) {
+		assert.ok(hosts(id).includes('factuel.afp.com'), id);
+	}
+	assert.deepEqual(defaultDomains('other'), defaultDomains('other').filter(d => d !== 'ouest-france.fr' && d !== 'humanite.fr'));
+});
+
+test('Humanité articles at any section path are matched and named', async () => {
+	const { sourceName } = await import('../lib/factcheck.js');
+	const sources = trustedSources('', 'humanite');
+	// The real article URLs from the site: sections vary, as with 20 Minutes.
+	for (const url of [
+		'https://www.humanite.fr/monde/aide-humanitaire/une-question-de-vie-ou-de-mort-bombardements',
+		'https://www.humanite.fr/social-et-economie/casse-industrielle/la-liquidation-judiciaire-de-fibre-excellence',
+	]) {
+		assert.ok(matchSource(url, sources), url);
+	}
+	assert.equal(sourceName('humanite.fr'), 'L’Humanité');
+	assert.ok(!matchSource('https://humanite.fr.example.com/x', sources));
+});
+
+test('an instance can set its own list, which wins over the built-in one', async () => {
+	process.env.FACTCHECK_DOMAINS = '';
+	stubNetwork({
+		model: modelSays(CHECKABLE),
+		search: searchSays([
+			{ link: 'https://www.humanite.fr/social/budget', title: 'Budget', snippet: 'Le budget augmente de 40 % selon le rapport.' },
+			{ link: 'https://www.ouest-france.fr/budget', title: 'Budget', snippet: 'Le budget augmente de 40 % selon le rapport.' },
+		]),
+	});
+	const result = await gatherEvidence({ content: CONTENT, instance: { id: 'humanite' } });
+	assert.deepEqual(result.evidence.map(item => item.site), ['humanite.fr']);
+	const custom = await gatherEvidence({ content: CONTENT, instance: { id: 'humanite', factCheckDomains: 'ouest-france.fr' } });
+	assert.deepEqual(custom.evidence.map(item => item.site), ['ouest-france.fr']);
 });
 

@@ -81,13 +81,16 @@ const writeAndPublish = async ({
 	// time, so the model is never asked for two things at once (its rate limit
 	// is per minute). It has its own time limit and never throws.
 	const mode = factCheckMode();
-	const found = mode === 'on' ? await gatherEvidence({ content }) : null;
+	const found =
+		mode === 'on' ? await gatherEvidence({ content, instance }) : null;
 
 	const mention = `@${requester.acct}`;
 	const text = await summarizeConversation({
 		content,
 		images,
-		botName: instance.botName || 'PouetFrance IA',
+		// Each app's bot names itself: the prompt must not say PouetFrance in an
+		// app that is not Pouet.
+		botName: instance.botName,
 		// The mention and the space before it are published too, so the model's
 		// own budget has to leave room for them inside Mastodon's 500.
 		maxCharacters: CONFIG.maxStatusCharacters - mention.length - 1,
@@ -157,7 +160,9 @@ const writeAndPublish = async ({
 	if (found) {
 		keepAlive(record(found).catch(() => {}));
 	} else if (mode === 'log') {
-		keepAlive(gatherEvidence({ content }).then(record).catch(() => {}));
+		keepAlive(
+			gatherEvidence({ content, instance }).then(record).catch(() => {}),
+		);
 	}
 	return { botStatusId };
 };

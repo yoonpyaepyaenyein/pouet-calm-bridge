@@ -7,6 +7,7 @@
  *   MISTRAL_API_KEY=... node scripts/try-prompt.js
  *   MISTRAL_API_KEY=... node scripts/try-prompt.js --only fr-heated
  *   MISTRAL_API_KEY=... SERPER_API_KEY=... node scripts/try-prompt.js --factcheck
+ *   node scripts/try-prompt.js --factcheck --instance humanite --only fr-phone-law
  *
  * --factcheck previews "on" mode: for each case it prints the claim found and
  * the trusted sources kept, then the post as it would be published: the reply,
@@ -145,6 +146,12 @@ const CASES = {
 	},
 };
 
+// --instance humanite previews another app: its bot name and its own newspaper.
+const instanceId = process.argv.includes('--instance')
+	? process.argv[process.argv.indexOf('--instance') + 1]
+	: 'pouet';
+const BOT_NAMES = { pouet: 'PouetFrance IA' };
+
 const only = process.argv.includes('--only')
 	? process.argv[process.argv.indexOf('--only') + 1]
 	: null;
@@ -198,13 +205,15 @@ const run = async () => {
 		});
 		// With --factcheck this is exactly "on" mode: the search first, then the
 		// reply written with whatever it found.
-		const found = factCheck ? await gatherEvidence({ content }) : null;
+		const found = factCheck
+			? await gatherEvidence({ content, instance: { id: instanceId } })
+			: null;
 		if (found) printEvidence(found);
 		try {
 			const text = await summarizeConversation({
 				content,
 				images,
-				botName: 'PouetFrance IA',
+				botName: BOT_NAMES[instanceId] || 'Calm Bot',
 				maxCharacters: CONFIG.maxStatusCharacters - mention.length - 1,
 				onRefused: (reason, draft) =>
 					console.log(`   refused draft (${reason}):\n   ${draft || '(no text)'}`),
