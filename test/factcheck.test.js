@@ -378,6 +378,27 @@ test('each app searches its own newspaper, never the other one', () => {
 	assert.deepEqual(defaultDomains('other'), defaultDomains('other').filter(d => d !== 'ouest-france.fr' && d !== 'humanite.fr'));
 });
 
+test('the Ouest-France app searches ouest-france.fr, under the id the app sends', async () => {
+	// The app sends "ouestFrance"; the instance id the bridge keeps is lower case.
+	process.env.CALM_INSTANCES = 'pouet,humanite,ouestfrance';
+	process.env.CALM_OUESTFRANCE_HOST = 'social.ouest-france.fr';
+	process.env.CALM_OUESTFRANCE_BOT_TOKEN = 'of-token';
+	try {
+		const { getInstance } = await import('../lib/config.js');
+		const instance = getInstance('ouestFrance');
+		assert.equal(instance.id, 'ouestfrance');
+		assert.equal(instance.host, 'social.ouest-france.fr');
+		const hosts = trustedSources('', instance.id).map(source => source.host);
+		assert.equal(hosts[0], 'ouest-france.fr', 'its own newspaper comes first');
+		assert.ok(!hosts.includes('humanite.fr'), 'not another app\'s newspaper');
+		assert.ok(hosts.includes('factuel.afp.com'));
+	} finally {
+		delete process.env.CALM_INSTANCES;
+		delete process.env.CALM_OUESTFRANCE_HOST;
+		delete process.env.CALM_OUESTFRANCE_BOT_TOKEN;
+	}
+});
+
 test('Humanité articles at any section path are matched and named', async () => {
 	const { sourceName } = await import('../lib/factcheck.js');
 	const sources = trustedSources('', 'humanite');
